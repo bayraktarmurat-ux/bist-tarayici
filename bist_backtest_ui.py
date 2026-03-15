@@ -242,6 +242,7 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
     # ── ÇOKLU HİSSE MODU ──────────────────────────────────────────────────────
     if tum_hisseler:
         ozet_listesi = []
+        tum_islemler = []   # kümülatif portföy için tüm işlemler
         progress = st.progress(0, text="Tarama başlıyor...")
         toplam_h = len(BIST_HISSELER)
 
@@ -308,7 +309,7 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                         cikis = float(df.iloc[min(i + 59, len(df) - 1)]["Close"])
                         kaz   = (cikis - giris) * lot
                     portfoy_s += kaz
-                    islemler.append({"sonuc": sonuc, "kaz": kaz})
+                    islemler.append({"tarih": son.name, "sonuc": sonuc, "kaz": kaz})
 
                 if not islemler:
                     continue
@@ -333,12 +334,21 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                     "K/Z (TL)"   : round(df_i["kaz"].sum(), 0),
                     "Kar Faktörü": round(kf, 2) if kf < 999 else float("inf"),
                 })
+                # Kümülatif portföy için tarih + kaz ekle
+                for ist in islemler:
+                    tum_islemler.append({
+                        "Tarih" : ist["tarih"],
+                        "Hisse" : sembol,
+                        "sonuc" : ist["sonuc"],
+                        "kaz"   : ist["kaz"],
+                    })
             except Exception:
                 continue
 
         progress.empty()
         st.session_state["mod"]          = "coklu"
         st.session_state["ozet_listesi"] = ozet_listesi
+        st.session_state["tum_islemler"] = tum_islemler
         st.session_state["portfoy"]      = portfoy
 
     # ── TEKİL HİSSE MODU ──────────────────────────────────────────────────────
@@ -453,6 +463,7 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
 # ─── SONUÇLAR — ÇOKLU MOD ─────────────────────────────────────────────────────
 if st.session_state.get("mod") == "coklu" and "ozet_listesi" in st.session_state:
     ozet_listesi = st.session_state["ozet_listesi"]
+    tum_islemler = st.session_state.get("tum_islemler", [])
     portfoy0     = st.session_state["portfoy"]
 
     st.markdown("### Tüm Hisseler Backtest Sonuçları")
@@ -464,6 +475,68 @@ if st.session_state.get("mod") == "coklu" and "ozet_listesi" in st.session_state
     df_oz = pd.DataFrame(ozet_listesi).sort_values("Getiri%", ascending=False)
     poz   = len(df_oz[df_oz["Getiri%"] > 0])
     kf_f  = df_oz[df_oz["Kar Faktörü"] < 999]["Kar Faktörü"]
+
+    # Kümülatif portföy hesapla
+    if tum_islemler:
+        df_tum = pd.DataFrame(tum_islemler).sort_values("Tarih")
+        df_tum["Portfoy"] = portfoy0 + df_tum["kaz"].cumsum()
+        portfoy_son = df_tum["Portfoy"].iloc[-1]
+        toplam_kz   = df_tum["kaz"].sum()
+        getiri_top  = (portfoy_son - portfoy0) / portfoy0 * 100
+        kazanan_top = len(df_tum[df_tum["sonuc"] == "hedef"])
+        kaybeden_top= len(df_tum[df_tum["sonuc"] == "stop"])
+        toplam_islem= len(df_tum[df_tum["sonuc"] != "acik"])
+        wr_top      = kazanan_top / toplam_islem * 100 if toplam_islem > 0 else 0
+    else:
+        portfoy_son = portfoy0
+        toplam_kz   = 0
+        getiri_top  = 0
+        wr_top      = 0
+
+    g_renk = "metric-pos" if getiri_top >= 0 else "metric-neg"
+    k_renk = "metric-pos" if toplam_kz  >= 0 else "metric-neg"
+
+    # Portföy özet kartları
+    st.markdown("#### 💰 Kümülatif Portföy")
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    for col, lbl, val, renk in [
+        (c1, "Başlangıç",       f"{portfoy0:,.0f} TL",   "metric-neu"),
+        (c2, "Bitiş",           f"{portfoy_son:,.0f} TL", g_renk),
+        (c3, "Toplam K/Z",      f"{toplam_kz:+,.0f} TL", k_renk),
+        (c4, "Getiri",          f"{getiri_top:+.1f}%",    g_renk),
+        (c5, "Toplam İşlem",    str(toplam_islem),        "metric-neu"),
+        (c6, "Win Rate",        f"{wr_top:.1f}%",         "metric-neu"),
+    ]:
+        col.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-label">{lbl}</div>
+            <div class="metric-value {renk}">{val}</div>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("")
+
+    # Kümülatif portföy grafiği
+    if tum_islemler:
+        fig_p = go.Figure()
+        fig_p.add_trace(go.Scatter(
+            x=df_tum["Tarih"], y=df_tum["Portfoy"],
+            fill="tozeroy", line=dict(color="#38bdf8", width=2),
+            fillcolor="rgba(56,189,248,0.08)", name="Portföy"
+        ))
+        fig_p.add_hline(y=portfoy0, line_dash="dash",
+                        line_color="#64748b", line_width=1)
+        fig_p.update_layout(
+            template="plotly_dark", paper_bgcolor="#0d0f14",
+            plot_bgcolor="#0d0f14", height=300,
+            margin=dict(l=10,r=10,t=20,b=10),
+            yaxis=dict(gridcolor="#1e293b", tickformat=",.0f", ticksuffix=" TL"),
+            xaxis=dict(gridcolor="#1e293b"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig_p, use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("#### 📊 Hisse Bazlı Sonuçlar")
 
     c1,c2,c3,c4,c5 = st.columns(5)
     for col, lbl, val, renk in [
