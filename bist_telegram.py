@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 import yfinance as yf
 from datetime import datetime
 import requests
@@ -7,19 +6,31 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+# ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-PORTFOY      = 950000
-RISK_YUZDESI = 1.0
-ATR_PERIYOT  = 14
-ATR_KATSAYI  = 1.5
-RR_KATSAYI   = 2.5
-EMA_TOLERANS = 2.0
-STOK_ESIK    = 20
+# ─── STRATEJİ PARAMETRELERİ ───────────────────────────────────────────────────
+PORTFOY        = 950_000
+RISK_YUZDESI   = 1.0
+ATR_PERIYOT    = 14
+ATR_KATSAYI    = 1.5
+RR_KATSAYI     = 3.0       # 2.5'ten 3.0'a guncellendi
+STOK_ESIK      = 20
+ENDEKS_SEMBOL  = "XU100.IS"
 
+# ─── EN BASARILI 50 HİSSE ─────────────────────────────────────────────────────
+TOP50 = {
+    "POLTK","BMSTL","LIDER","AVTUR","MOBTL","ISCTR","DOAS","TRCAS","CMBTN","ISBTR",
+    "LUKSK","DOHOL","DOCO","VBTYZ","MERIT","TEHOL","VAKKO","ALGYO","FRIGO","BMSCH",
+    "HEDEF","ETILR","ASELS","ESCOM","AKSA","ULUUN","GRTHO","OYAKC","FMIZP","RYSAS",
+    "KARSN","SMRVA","BRYAT","YAPRK","NETAS","SELEC","SAFKR","CELHA","ECILC","BURCE",
+    "GLCVY","EGEEN","ACSEL","KUYAS","RYGYO","INDES","MAGEN","AKSEN","ARCLK","YYAPI",
+}
+
+# ─── HİSSE LİSTESİ ────────────────────────────────────────────────────────────
 HISSELER = [
-   "ACSEL","ADEL","ADESE","ADGYO","AFYON","AGHOL","AGESA","AGROT","AHSGY","AHGAZ",
+    "ACSEL","ADEL","ADESE","ADGYO","AFYON","AGHOL","AGESA","AGROT","AHSGY","AHGAZ",
     "AKYHO","AKENR","AKFGY","AKFIS","AKFYE","AKHAN","ATEKS","AKSGY","AKMGY","AKSA",
     "AKSEN","AKGRT","AKSUE","ALCAR","ALGYO","ALARK","ALBRK","ALCTL","ALFAS","ALKIM",
     "ALKA","AYCES","ALTNY","ALKLC","ALVES","ANSGR","AEFES","ANHYT","ASUZU","ANGEN",
@@ -82,40 +93,47 @@ HISSELER = [
     "BINHO",
 ]
 
+# ─── YARDIMCI FONKSİYONLAR ────────────────────────────────────────────────────
+def squeeze(s):
+    if hasattr(s, "squeeze"):
+        return s.squeeze()
+    return s
+
 def ema(seri, periyot):
-    return seri.ewm(span=periyot, adjust=False).mean()
+    return squeeze(seri).ewm(span=periyot, adjust=False).mean()
 
 def atr_hesapla(df, periyot=14):
-    hl = df["High"] - df["Low"]
-    hc = (df["High"] - df["Close"].shift(1)).abs()
-    lc = (df["Low"]  - df["Close"].shift(1)).abs()
+    c  = squeeze(df["Close"])
+    h  = squeeze(df["High"])
+    l  = squeeze(df["Low"])
+    hl = h - l
+    hc = (h - c.shift(1)).abs()
+    lc = (l - c.shift(1)).abs()
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     return tr.ewm(span=periyot, adjust=False).mean()
 
 def stokastik_hesapla(df, k=5, d=3, smooth=3):
-    ll    = df["Low"].rolling(k).min()
-    hh    = df["High"].rolling(k).max()
-    k_raw = 100 * (df["Close"] - ll) / (hh - ll + 1e-9)
+    c     = squeeze(df["Close"])
+    h     = squeeze(df["High"])
+    l     = squeeze(df["Low"])
+    ll    = l.rolling(k).min()
+    hh    = h.rolling(k).max()
+    k_raw = 100 * (c - ll) / (hh - ll + 1e-9)
     k_sm  = k_raw.rolling(smooth).mean()
     d_sm  = k_sm.rolling(d).mean()
     return k_sm, d_sm
 
 def veri_cek(ticker, gun=300):
     try:
-        df = yf.download(
-            ticker + ".IS", period=str(gun) + "d",
-            interval="1d", progress=False, auto_adjust=True
-        )
+        df = yf.download(ticker + ".IS", period=str(gun) + "d",
+                         interval="1d", progress=False, auto_adjust=True)
         if df is None or df.empty or len(df) < 60:
             return None
-        # MultiIndex düzelt
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[["Open","High","Low","Close","Volume"]].copy()
-        # Sütunlar hala DataFrame ise Series'e çevir
-        for col in ["Open","High","Low","Close","Volume"]:
-            if isinstance(df[col], pd.DataFrame):
-                df[col] = df[col].iloc[:, 0]
+        for col in df.columns:
+            df[col] = squeeze(df[col])
         df = df.dropna()
         if len(df) < 60:
             return None
@@ -123,10 +141,32 @@ def veri_cek(ticker, gun=300):
     except Exception:
         return None
 
+# ─── ENDEKS FİLTRESİ ──────────────────────────────────────────────────────────
+def endeks_kontrol():
+    try:
+        df = yf.download(ENDEKS_SEMBOL, period="300d",
+                         interval="1d", progress=False, auto_adjust=True)
+        if df.empty:
+            return None, None, None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df["EMA200"] = squeeze(df["Close"]).ewm(span=200, adjust=False).mean()
+        df.dropna(subset=["EMA200"], inplace=True)
+        son    = df.iloc[-1]
+        kap    = float(son["Close"])
+        e200   = float(son["EMA200"])
+        fark   = (kap - e200) / e200 * 100
+        return kap > e200, round(kap, 0), round(fark, 1)
+    except Exception:
+        return None, None, None
+
+# ─── SİNYAL TARAMA (YENİ STRATEJİ) ───────────────────────────────────────────
 def sinyal_tara(df):
-    tolerans = EMA_TOLERANS / 100
+    """
+    Degisen kural: EMA tolerans yerine gercek dokunus (low <= EMA <= high)
+    """
     df = df.copy()
-    close = df["Close"].squeeze()
+    close = squeeze(df["Close"])
     df["EMA20"]  = ema(close, 20)
     df["EMA50"]  = ema(close, 50)
     df["EMA100"] = ema(close, 100)
@@ -134,38 +174,54 @@ def sinyal_tara(df):
     df["ATR"]    = atr_hesapla(df, ATR_PERIYOT)
     df["K"], df["D"] = stokastik_hesapla(df)
 
-    son   = df.iloc[-1]
-    once  = df.iloc[-2]
-    kapanis = float(son["Close"])
+    son  = df.iloc[-1]
+    once = df.iloc[-2]
 
-    if not (son["EMA20"] > son["EMA50"] > son["EMA100"] > son["EMA200"]):
+    # 1. Trend filtresi
+    if not (float(son["EMA20"]) > float(son["EMA50"]) >
+            float(son["EMA100"]) > float(son["EMA200"])):
         return None
+
+    # 2. Stokastik: K<20'de K, D'yi yukari kesti
     if not (float(once["K"]) < float(once["D"]) and
             float(son["K"])  > float(son["D"])  and
             float(son["K"])  < STOK_ESIK):
         return None
 
+    # 3. EMA dokunusu: gunun low-high araligi EMA'ya degmeli
+    low_v  = float(son["Low"])
+    high_v = float(son["High"])
     ema_destek = None
     for col in ["EMA20","EMA50","EMA100","EMA200"]:
-        ema_val = float(son[col])
-        if abs(kapanis - ema_val) / ema_val <= tolerans:
+        ev = float(son[col])
+        if low_v <= ev <= high_v:
             ema_destek = col
             break
     if ema_destek is None:
         return None
 
+    kapanis = float(son["Close"])
     atr_val = float(son["ATR"])
     stop    = round(kapanis - ATR_KATSAYI * atr_val, 2)
-    hedef   = round(kapanis + RR_KATSAYI * ATR_KATSAYI * atr_val, 2)
+    hedef   = round(kapanis + (kapanis - stop) * RR_KATSAYI, 2)
+    stop_p  = round((kapanis - stop) / kapanis * 100, 1)
+    hedef_p = round((hedef - kapanis) / kapanis * 100, 1)
+
     return {
         "kapanis":    round(kapanis, 2),
         "ema_destek": ema_destek,
         "k":          round(float(son["K"]), 2),
         "stop":       stop,
+        "stop_p":     stop_p,
         "hedef":      hedef,
+        "hedef_p":    hedef_p,
     }
 
+# ─── TELEGRAM ─────────────────────────────────────────────────────────────────
 def telegram_gonder(mesaj):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram token/chat_id eksik!")
+        return False
     url  = "https://api.telegram.org/bot" + TELEGRAM_TOKEN + "/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}
     try:
@@ -175,8 +231,30 @@ def telegram_gonder(mesaj):
         print("Telegram hatasi:", e)
         return False
 
+# ─── ANA FONKSİYON ────────────────────────────────────────────────────────────
 def main():
     print("Tarama basliyor:", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    tarih = datetime.now().strftime("%d.%m.%Y %H:%M")
+
+    # Endeks kontrolu
+    endeks_ok, xu100, xu_fark = endeks_kontrol()
+
+    if endeks_ok is False:
+        mesaj  = "<b>BIST Sinyal Tarayici - " + tarih + "</b>\n\n"
+        mesaj += "BIST100 EMA200 altinda!\n"
+        mesaj += "XU100: " + str(xu100) + " TL"
+        if xu_fark is not None:
+            mesaj += " (" + str(xu_fark) + "%)"
+        mesaj += "\n\nStrateji bugun pasif, islem onerilmez."
+        telegram_gonder(mesaj)
+        print("Endeks pasif, islem yok.")
+        return
+
+    endeks_durum = ""
+    if xu100 and xu_fark is not None:
+        endeks_durum = "XU100: " + str(xu100) + " (" + ("+" if xu_fark >= 0 else "") + str(xu_fark) + "%)"
+
+    # Hisse tarama
     risk_tl   = PORTFOY * RISK_YUZDESI / 100
     sinyaller = []
 
@@ -195,46 +273,63 @@ def main():
         risk_hisse = sonuc["kapanis"] - sonuc["stop"]
         if risk_hisse <= 0:
             continue
-        lot      = int(risk_tl / risk_hisse)
-        giris_tl = round(lot * sonuc["kapanis"], 2)
+        lot      = max(1, int(risk_tl / risk_hisse))
+        giris_tl = round(lot * sonuc["kapanis"], 0)
+        top50    = hisse in TOP50
 
         sinyaller.append({
             "hisse":    hisse,
+            "top50":    top50,
             "kapanis":  sonuc["kapanis"],
             "destek":   sonuc["ema_destek"],
             "k":        sonuc["k"],
             "stop":     sonuc["stop"],
+            "stop_p":   sonuc["stop_p"],
             "hedef":    sonuc["hedef"],
+            "hedef_p":  sonuc["hedef_p"],
             "lot":      lot,
             "giris_tl": giris_tl,
-            "risk_tl":  round(risk_tl, 2),
+            "risk_tl":  round(risk_tl, 0),
         })
 
-    sinyaller.sort(key=lambda x: x["k"])
-    tarih = datetime.now().strftime("%d.%m.%Y")
+    # Top50 once, sonra %K'ya gore sirala
+    sinyaller.sort(key=lambda x: (not x["top50"], x["k"]))
 
-    if len(sinyaller) == 0:
-        mesaj  = "<b>📈 BIST Sinyal Tarayici</b>\n"
-        mesaj += "<b>" + tarih + "</b>\n\n"
-        mesaj += "Bugun sinyal bulunamadi."
+    top50_count = sum(1 for s in sinyaller if s["top50"])
+
+    # Sonuc yok
+    if not sinyaller:
+        mesaj  = "<b>BIST Sinyal Tarayici - " + tarih + "</b>\n"
+        if endeks_durum:
+            mesaj += endeks_durum + "\n"
+        mesaj += "\nBugun sinyal bulunamadi."
         telegram_gonder(mesaj)
         print("Sinyal yok.")
         return
 
-    baslik  = "<b>📈 BIST Sinyal Tarayici — " + tarih + "</b>\n"
-    baslik += "<b>" + str(len(sinyaller)) + " sinyal bulundu</b>\n"
-    baslik += "Portfoy: " + str(PORTFOY) + " TL | Risk: %" + str(RISK_YUZDESI) + "\n"
-    baslik += "━━━━━━━━━━━━━━━━━━━━"
+    # Baslik mesaji
+    baslik  = "<b>BIST Sinyal Tarayici - " + tarih + "</b>\n"
+    if endeks_durum:
+        baslik += endeks_durum + "\n"
+    baslik += str(len(sinyaller)) + " sinyal"
+    if top50_count > 0:
+        baslik += " | " + str(top50_count) + " adet TOP50"
+    baslik += "\nPortfoy: " + str(PORTFOY) + " TL | Risk: %" + str(RISK_YUZDESI) + " | R:R 1:" + str(RR_KATSAYI)
+    baslik += "\n" + "─" * 22
     telegram_gonder(baslik)
 
+    # Her sinyal icin mesaj
     for s in sinyaller:
-        mesaj  = "<b>" + s["hisse"] + "</b> | " + s["destek"] + "\n"
-        mesaj += "Fiyat: <b>" + str(s["kapanis"]) + "</b> TL\n"
-        mesaj += "Stop: " + str(s["stop"]) + " | Hedef: " + str(s["hedef"]) + "\n"
-        mesaj += "Lot: " + str(s["lot"]) + " | Giris: " + str(s["giris_tl"]) + " TL\n"
-        mesaj += "Risk: " + str(s["risk_tl"]) + " TL | %K: " + str(s["k"])
+        star  = " STAR " if s["top50"] else ""
+        mesaj  = "<b>" + star + s["hisse"] + star + "</b> | " + s["destek"] + "\n"
+        mesaj += "Fiyat: <b>" + str(s["kapanis"]) + " TL</b>\n"
+        mesaj += "Stop:  " + str(s["stop"]) + " (-%" + str(s["stop_p"]) + ")\n"
+        mesaj += "Hedef: " + str(s["hedef"]) + " (+%" + str(s["hedef_p"]) + ")\n"
+        mesaj += "R:R  : 1:" + str(RR_KATSAYI) + "\n"
+        mesaj += "Lot:   " + str(s["lot"]) + " adet | " + str(int(s["giris_tl"])) + " TL\n"
+        mesaj += "Risk:  " + str(int(s["risk_tl"])) + " TL | %K: " + str(s["k"])
         telegram_gonder(mesaj)
-        print("Sinyal:", s["hisse"])
+        print("Sinyal gonderildi:", s["hisse"], "| TOP50:" if s["top50"] else "")
 
     print("Tamamlandi. Toplam sinyal:", len(sinyaller))
 
