@@ -69,8 +69,8 @@ def stokastik_hesapla(df, k=5, d=3, smooth=3):
 def veri_cek(ticker, bas, bit):
     try:
         df = yf.download(ticker + ".IS",
-                         start=bas.strftime("%Y-%m-%d"),
-                         end=bit.strftime("%Y-%m-%d"),
+                         start=str(bas),
+                         end=str(bit),
                          interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 50:
             return None
@@ -150,9 +150,12 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
     bit_ts  = pd.Timestamp(bit_tarih)
 
     with st.spinner(f"{hisse_input} verisi indiriliyor..."):
-        # EMA200 için 1 yıl önceden başla
+        # EMA200 icin 1 yil onceden baslat
         veri_bas = bas_ts - pd.DateOffset(years=1)
-        df_raw = veri_cek(hisse_input, veri_bas, bit_ts + pd.DateOffset(days=1))
+        veri_bit = bit_ts + pd.DateOffset(days=2)
+        df_raw = veri_cek(hisse_input,
+                          veri_bas.to_pydatetime().date(),
+                          veri_bit.to_pydatetime().date())
 
     if df_raw is None:
         st.error(f"❌ {hisse_input}.IS için veri alınamadı. Hisse kodunu kontrol edin.")
