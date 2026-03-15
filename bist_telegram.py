@@ -15,9 +15,11 @@ PORTFOY        = 950_000
 RISK_YUZDESI   = 1.0
 ATR_PERIYOT    = 14
 ATR_KATSAYI    = 1.5
-RR_KATSAYI     = 3.0       # 2.5'ten 3.0'a guncellendi
-STOK_ESIK      = 20
+RR_KATSAYI     = 3.0
 ENDEKS_SEMBOL  = "XU100.IS"
+MACD_HIZLI     = 12
+MACD_YAVAS     = 26
+MACD_SINYAL    = 9
 
 # ─── EN BASARILI 50 HİSSE ─────────────────────────────────────────────────────
 TOP50 = {
@@ -160,10 +162,10 @@ def endeks_kontrol():
     except Exception:
         return None, None, None
 
-# ─── SİNYAL TARAMA (YENİ STRATEJİ) ───────────────────────────────────────────
+# ─── SİNYAL TARAMA (MACD STRATEJİSİ) ────────────────────────────────────────
 def sinyal_tara(df):
     """
-    Degisen kural: EMA tolerans yerine gercek dokunus (low <= EMA <= high)
+    Strateji: Trend (EMA20>50>100>200) + MACD histogram negatiften pozitife donus
     """
     df = df.copy()
     close = squeeze(df["Close"])
@@ -172,7 +174,13 @@ def sinyal_tara(df):
     df["EMA100"] = ema(close, 100)
     df["EMA200"] = ema(close, 200)
     df["ATR"]    = atr_hesapla(df, ATR_PERIYOT)
-    df["K"], df["D"] = stokastik_hesapla(df)
+
+    # MACD
+    ema_h          = close.ewm(span=MACD_HIZLI,  adjust=False).mean()
+    ema_y          = close.ewm(span=MACD_YAVAS,  adjust=False).mean()
+    df["MACD"]     = ema_h - ema_y
+    df["MACD_SIG"] = df["MACD"].ewm(span=MACD_SINYAL, adjust=False).mean()
+    df["MACD_HIS"] = df["MACD"] - df["MACD_SIG"]
 
     son  = df.iloc[-1]
     once = df.iloc[-2]
@@ -182,22 +190,9 @@ def sinyal_tara(df):
             float(son["EMA100"]) > float(son["EMA200"])):
         return None
 
-    # 2. Stokastik: K<20'de K, D'yi yukari kesti
-    if not (float(once["K"]) < float(once["D"]) and
-            float(son["K"])  > float(son["D"])  and
-            float(son["K"])  < STOK_ESIK):
-        return None
-
-    # 3. EMA dokunusu: gunun low-high araligi EMA'ya degmeli
-    low_v  = float(son["Low"])
-    high_v = float(son["High"])
-    ema_destek = None
-    for col in ["EMA20","EMA50","EMA100","EMA200"]:
-        ev = float(son[col])
-        if low_v <= ev <= high_v:
-            ema_destek = col
-            break
-    if ema_destek is None:
+    # 2. MACD histogram: negatiften pozitife dondü
+    if not (float(once["MACD_HIS"]) < 0 and
+            float(son["MACD_HIS"])   > 0):
         return None
 
     kapanis = float(son["Close"])
@@ -208,13 +203,13 @@ def sinyal_tara(df):
     hedef_p = round((hedef - kapanis) / kapanis * 100, 1)
 
     return {
-        "kapanis":    round(kapanis, 2),
-        "ema_destek": ema_destek,
-        "k":          round(float(son["K"]), 2),
-        "stop":       stop,
-        "stop_p":     stop_p,
-        "hedef":      hedef,
-        "hedef_p":    hedef_p,
+        "kapanis" : round(kapanis, 2),
+        "macd_his": round(float(son["MACD_HIS"]), 4),
+        "macd"    : round(float(son["MACD"]), 4),
+        "stop"    : stop,
+        "stop_p"  : stop_p,
+        "hedef"   : hedef,
+        "hedef_p" : hedef_p,
     }
 
 # ─── TELEGRAM ─────────────────────────────────────────────────────────────────
@@ -278,22 +273,22 @@ def main():
         top50    = hisse in TOP50
 
         sinyaller.append({
-            "hisse":    hisse,
-            "top50":    top50,
-            "kapanis":  sonuc["kapanis"],
-            "destek":   sonuc["ema_destek"],
-            "k":        sonuc["k"],
-            "stop":     sonuc["stop"],
-            "stop_p":   sonuc["stop_p"],
-            "hedef":    sonuc["hedef"],
-            "hedef_p":  sonuc["hedef_p"],
-            "lot":      lot,
+            "hisse"   : hisse,
+            "top50"   : top50,
+            "kapanis" : sonuc["kapanis"],
+            "macd_his": sonuc["macd_his"],
+            "macd"    : sonuc["macd"],
+            "stop"    : sonuc["stop"],
+            "stop_p"  : sonuc["stop_p"],
+            "hedef"   : sonuc["hedef"],
+            "hedef_p" : sonuc["hedef_p"],
+            "lot"     : lot,
             "giris_tl": giris_tl,
-            "risk_tl":  round(risk_tl, 0),
+            "risk_tl" : round(risk_tl, 0),
         })
 
-    # Top50 once, sonra %K'ya gore sirala
-    sinyaller.sort(key=lambda x: (not x["top50"], x["k"]))
+    # Top50 once, sonra MACD_HIS buyukten kucuge sirala
+    sinyaller.sort(key=lambda x: (not x["top50"], -x["macd_his"]))
 
     top50_count = sum(1 for s in sinyaller if s["top50"])
 
@@ -308,7 +303,7 @@ def main():
         return
 
     # Baslik mesaji
-    baslik  = "<b>BIST Sinyal Tarayici - " + tarih + "</b>\n"
+    baslik  = "<b>BIST MACD Sinyal Tarayici - " + tarih + "</b>\n"
     if endeks_durum:
         baslik += endeks_durum + "\n"
     baslik += str(len(sinyaller)) + " sinyal"
@@ -321,13 +316,14 @@ def main():
     # Her sinyal icin mesaj
     for s in sinyaller:
         star  = " STAR " if s["top50"] else ""
-        mesaj  = "<b>" + star + s["hisse"] + star + "</b> | " + s["destek"] + "\n"
+        mesaj  = "<b>" + star + s["hisse"] + star + "</b>\n"
         mesaj += "Fiyat: <b>" + str(s["kapanis"]) + " TL</b>\n"
+        mesaj += "MACD His: " + str(s["macd_his"]) + " (+ dondu)\n"
         mesaj += "Stop:  " + str(s["stop"]) + " (-%" + str(s["stop_p"]) + ")\n"
         mesaj += "Hedef: " + str(s["hedef"]) + " (+%" + str(s["hedef_p"]) + ")\n"
         mesaj += "R:R  : 1:" + str(RR_KATSAYI) + "\n"
         mesaj += "Lot:   " + str(s["lot"]) + " adet | " + str(int(s["giris_tl"])) + " TL\n"
-        mesaj += "Risk:  " + str(int(s["risk_tl"])) + " TL | %K: " + str(s["k"])
+        mesaj += "Risk:  " + str(int(s["risk_tl"])) + " TL"
         telegram_gonder(mesaj)
         print("Sinyal gonderildi:", s["hisse"], "| TOP50:" if s["top50"] else "")
 
