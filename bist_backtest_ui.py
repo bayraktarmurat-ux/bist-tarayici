@@ -209,8 +209,10 @@ rr_kat  = st.sidebar.select_slider("R:R Katsayısı",
 atr_kat = st.sidebar.slider("ATR Katsayısı (Stop)", 0.5, 3.0, 1.5, 0.5)
 atr_per = st.sidebar.slider("ATR Periyodu", 7, 21, 14, 1)
 
-st.sidebar.markdown("### 📉 Stokastik")
-stok_esik = st.sidebar.slider("Stokastik Eşik", 10, 40, 20, 5)
+st.sidebar.markdown("### 📊 MACD")
+macd_hizli = st.sidebar.slider("MACD Hızlı EMA", 5, 20, 12, 1)
+macd_yavas = st.sidebar.slider("MACD Yavaş EMA", 10, 50, 26, 1)
+macd_sinyal = st.sidebar.slider("MACD Sinyal", 5, 20, 9, 1)
 
 st.sidebar.markdown("### 🔍 Filtreler")
 endeks_aktif = st.sidebar.checkbox("Endeks Filtresi (BIST100 > EMA200)", value=True)
@@ -218,9 +220,9 @@ endeks_aktif = st.sidebar.checkbox("Endeks Filtresi (BIST100 > EMA200)", value=T
 # ─── BAŞLIK ───────────────────────────────────────────────────────────────────
 st.title("📊 BIST Backtest")
 if tum_hisseler:
-    st.caption(f"Mod: Tüm Hisseler | Strateji: EMA Dokunuşu + Stokastik | R:R 1:{rr_kat:.0f} | Stop ATR×{atr_kat}")
+    st.caption(f"Mod: Tüm Hisseler | Strateji: MACD Histogram Dönüşü | R:R 1:{rr_kat:.0f} | Stop ATR×{atr_kat}")
 else:
-    st.caption(f"Mod: Tekil Hisse | Strateji: EMA Dokunuşu + Stokastik | R:R 1:{rr_kat:.0f} | Stop ATR×{atr_kat}")
+    st.caption(f"Mod: Tekil Hisse | Strateji: MACD Histogram Dönüşü | R:R 1:{rr_kat:.0f} | Stop ATR×{atr_kat}")
 
 # ─── BACKTEST BUTONU ──────────────────────────────────────────────────────────
 if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="primary"):
@@ -260,8 +262,14 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                 df["EMA100"] = ema(df["Close"], 100)
                 df["EMA200"] = ema(df["Close"], 200)
                 df["ATR"]    = atr_hesapla(df, atr_per)
-                df["K"], df["D"] = stokastik_hesapla(df)
-                df.dropna(subset=["EMA200","K","D","ATR"], inplace=True)
+                # MACD
+                c = squeeze(df["Close"])
+                ema_h = c.ewm(span=macd_hizli, adjust=False).mean()
+                ema_y = c.ewm(span=macd_yavas, adjust=False).mean()
+                df["MACD"]     = ema_h - ema_y
+                df["MACD_SIG"] = df["MACD"].ewm(span=macd_sinyal, adjust=False).mean()
+                df["MACD_HIS"] = df["MACD"] - df["MACD_SIG"]
+                df.dropna(subset=["EMA200","MACD_HIS","ATR"], inplace=True)
                 if len(df) < 10:
                     continue
 
@@ -277,19 +285,9 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                     if not (float(son["EMA20"]) > float(son["EMA50"]) >
                             float(son["EMA100"]) > float(son["EMA200"])):
                         continue
-                    if not (float(onceki["K"]) < float(onceki["D"]) and
-                            float(son["K"]) > float(son["D"]) and
-                            float(son["K"]) < stok_esik):
-                        continue
-                    low_v  = float(son["Low"])
-                    high_v = float(son["High"])
-                    ema_destek = None
-                    for col_n in ["EMA20","EMA50","EMA100","EMA200"]:
-                        ev = float(son[col_n])
-                        if low_v <= ev <= high_v:
-                            ema_destek = col_n
-                            break
-                    if ema_destek is None:
+                    # MACD histogram donusu
+                    if not (float(onceki["MACD_HIS"]) < 0 and
+                            float(son["MACD_HIS"])    > 0):
                         continue
                     giris  = float(son["Close"])
                     atr_v  = float(son["ATR"])
@@ -368,13 +366,18 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
 
         with st.spinner("İndikatörler hesaplanıyor..."):
             df = df_raw.copy()
+            c = squeeze(df["Close"])
             df["EMA20"]  = ema(df["Close"], 20)
             df["EMA50"]  = ema(df["Close"], 50)
             df["EMA100"] = ema(df["Close"], 100)
             df["EMA200"] = ema(df["Close"], 200)
             df["ATR"]    = atr_hesapla(df, atr_per)
-            df["K"], df["D"] = stokastik_hesapla(df)
-            df.dropna(subset=["EMA200","K","D","ATR"], inplace=True)
+            ema_h = c.ewm(span=macd_hizli, adjust=False).mean()
+            ema_y = c.ewm(span=macd_yavas, adjust=False).mean()
+            df["MACD"]     = ema_h - ema_y
+            df["MACD_SIG"] = df["MACD"].ewm(span=macd_sinyal, adjust=False).mean()
+            df["MACD_HIS"] = df["MACD"] - df["MACD_SIG"]
+            df.dropna(subset=["EMA200","MACD_HIS","ATR"], inplace=True)
 
         with st.spinner("Sinyaller taranıyor..."):
             islemler  = []
@@ -394,23 +397,9 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                     float(son["EMA100"]) > float(son["EMA200"])):
                 continue
 
-            # Stokastik
-            if not (float(onceki["K"]) < float(onceki["D"]) and
-                    float(son["K"])    > float(son["D"])    and
-                    float(son["K"])    < stok_esik):
-                continue
-
-            # EMA dokunuşu
-            low_v  = float(son["Low"])
-            high_v = float(son["High"])
-            ema_destek = None
-            for col, label in [("EMA20","EMA20"),("EMA50","EMA50"),
-                                ("EMA100","EMA100"),("EMA200","EMA200")]:
-                ev = float(son[col])
-                if low_v <= ev <= high_v:
-                    ema_destek = label
-                    break
-            if ema_destek is None:
+            # MACD histogram donusu
+            if not (float(onceki["MACD_HIS"]) < 0 and
+                    float(son["MACD_HIS"])     > 0):
                 continue
 
             giris  = float(son["Close"])
@@ -445,8 +434,7 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                 "Sonuc"    : sonuc,
                 "KZ_TL"    : round(kaz, 0),
                 "Portfoy"  : round(portfoy_s, 0),
-                "EMA"      : ema_destek,
-                "K"        : round(float(son["K"]), 1),
+                "MACD_HIS" : round(float(son["MACD_HIS"]), 4),
                 "Lot"      : lot,
             })
 
@@ -677,17 +665,22 @@ elif st.session_state.get("mod") == "tekil" and "islemler" in st.session_state:
                 hoverinfo="text"
             ), row=1, col=1)
 
-        # Stokastik
-        fig.add_trace(go.Scatter(
-            x=df_grafik.index, y=df_grafik["K"],
-            name="%K", line=dict(color="#38bdf8", width=1.5)
+        # MACD histogram
+        colors = ["#3fb950" if float(v) >= 0 else "#ef4444"
+                  for v in df_grafik["MACD_HIS"]]
+        fig.add_trace(go.Bar(
+            x=df_grafik.index, y=df_grafik["MACD_HIS"],
+            name="MACD His.", marker_color=colors, opacity=0.7
         ), row=2, col=1)
         fig.add_trace(go.Scatter(
-            x=df_grafik.index, y=df_grafik["D"],
-            name="%D", line=dict(color="#f59e0b", width=1.5)
+            x=df_grafik.index, y=df_grafik["MACD"],
+            name="MACD", line=dict(color="#38bdf8", width=1.5)
         ), row=2, col=1)
-        fig.add_hline(y=stok_esik, line_dash="dot", line_color="#64748b", row=2, col=1)
-        fig.add_hline(y=80, line_dash="dot", line_color="#64748b", row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=df_grafik.index, y=df_grafik["MACD_SIG"],
+            name="Sinyal", line=dict(color="#f59e0b", width=1.5)
+        ), row=2, col=1)
+        fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=2, col=1)
 
         fig.update_layout(
             template="plotly_dark", paper_bgcolor="#0d0f14",
@@ -741,7 +734,7 @@ elif st.session_state.get("mod") == "tekil" and "islemler" in st.session_state:
 
         st.dataframe(
             df_goster[["Tarih","Giris","Stop","Hedef","Cikis","Sonuç",
-                        "K/Z (TL)","Portföy","EMA","K","Lot"]],
+                        "K/Z (TL)","Portföy","MACD_HIS","Lot"]],
             use_container_width=True,
             hide_index=True
         )
