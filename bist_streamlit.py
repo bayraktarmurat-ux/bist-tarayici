@@ -1,11 +1,9 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import yfinance as yf
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import io
 
 # ─── SAYFA AYARLARI ───────────────────────────────────────────────────────────
 st.set_page_config(
@@ -16,6 +14,15 @@ st.set_page_config(
 )
 
 # ─── HİSSE LİSTESİ ────────────────────────────────────────────────────────────
+# ─── EN BAŞARILI 50 HİSSE ─────────────────────────────────────────────────────
+TOP50 = {
+    "POLTK","BMSTL","LIDER","AVTUR","MOBTL","ISCTR","DOAS","TRCAS","CMBTN","ISBTR",
+    "LUKSK","DOHOL","DOCO","VBTYZ","MERIT","TEHOL","VAKKO","ALGYO","FRIGO","BMSCH",
+    "HEDEF","ETILR","ASELS","ESCOM","AKSA","ULUUN","GRTHO","OYAKC","FMIZP","RYSAS",
+    "KARSN","SMRVA","BRYAT","YAPRK","NETAS","SELEC","SAFKR","CELHA","ECILC","BURCE",
+    "GLCVY","EGEEN","ACSEL","KUYAS","RYGYO","INDES","MAGEN","AKSEN","ARCLK","YYAPI",
+}
+
 HISSELER = [
     "ACSEL","ADEL","ADESE","ADGYO","AFYON","AGHOL","AGESA","AGROT","AHSGY","AHGAZ",
     "AKYHO","AKENR","AKFGY","AKFIS","AKFYE","AKHAN","ATEKS","AKSGY","AKMGY","AKSA",
@@ -79,21 +86,30 @@ HISSELER = [
     "YBTAS","YIGIT","YONGA","YKSLN","YUNSA","ZGYO","ZEDUR","ZERGY","ZRGYO","ZOREN",
     "BINHO",
 ]
+
 # ─── YARDIMCI FONKSİYONLAR ────────────────────────────────────────────────────
 def ema(seri, periyot):
+    if hasattr(seri, "squeeze"):
+        seri = seri.squeeze()
     return seri.ewm(span=periyot, adjust=False).mean()
 
 def atr_hesapla(df, periyot=14):
-    hl = df["High"] - df["Low"]
-    hc = (df["High"] - df["Close"].shift(1)).abs()
-    lc = (df["Low"] - df["Close"].shift(1)).abs()
+    close = df["Close"].squeeze() if hasattr(df["Close"], "squeeze") else df["Close"]
+    high  = df["High"].squeeze()  if hasattr(df["High"],  "squeeze") else df["High"]
+    low   = df["Low"].squeeze()   if hasattr(df["Low"],   "squeeze") else df["Low"]
+    hl = high - low
+    hc = (high - close.shift(1)).abs()
+    lc = (low  - close.shift(1)).abs()
     tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
     return tr.ewm(span=periyot, adjust=False).mean()
 
 def stokastik_hesapla(df, k=5, d=3, smooth=3):
-    ll = df["Low"].rolling(k).min()
-    hh = df["High"].rolling(k).max()
-    k_raw = 100 * (df["Close"] - ll) / (hh - ll + 1e-9)
+    close = df["Close"].squeeze() if hasattr(df["Close"], "squeeze") else df["Close"]
+    high  = df["High"].squeeze()  if hasattr(df["High"],  "squeeze") else df["High"]
+    low   = df["Low"].squeeze()   if hasattr(df["Low"],   "squeeze") else df["Low"]
+    ll    = low.rolling(k).min()
+    hh    = high.rolling(k).max()
+    k_raw = 100 * (close - ll) / (hh - ll + 1e-9)
     k_sm  = k_raw.rolling(smooth).mean()
     d_sm  = k_sm.rolling(d).mean()
     return k_sm, d_sm
@@ -107,62 +123,96 @@ def veri_cek(ticker, gun=300):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[["Open","High","Low","Close","Volume"]].dropna()
+        # Python 3.14 / yeni pandas uyumu: her sutunu Series'e donustur
+        for col in df.columns:
+            df[col] = df[col].squeeze()
         return df
     except Exception:
         return None
 
+# ─── ENDEKS FİLTRESİ ──────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600)
+def endeks_kontrol():
+    """BIST100 son kapanış > EMA200 mi kontrol eder. Sonucu 1 saat cache'ler."""
+    try:
+        df = yf.download("XU100.IS", period="300d",
+                         interval="1d", progress=False, auto_adjust=True)
+        if df.empty:
+            return None, None, None, None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
+        df.dropna(subset=["EMA200"], inplace=True)
+        son         = df.iloc[-1]
+        kapanis     = float(son["Close"])
+        ema200      = float(son["EMA200"])
+        aktif       = kapanis > ema200
+        fark_pct    = (kapanis - ema200) / ema200 * 100
+        return aktif, kapanis, ema200, fark_pct
+    except Exception:
+        return None, None, None, None
+
+# ─── SİNYAL TARAMA (MACD STRATEJİSİ) ────────────────────────────────────────
 def sinyal_tara(df, params):
-    tolerans   = params["ema_tolerans"] / 100
-    stok_esik  = params["stok_esik"]
+    """
+    Strateji: Trend + MACD histogram negatiften pozitife donus
+    """
     atr_per    = params["atr_periyot"]
     atr_kat    = params["atr_katsayi"]
     rr         = params["rr_katsayi"]
+    macd_hizli = params["macd_hizli"]
+    macd_yavas = params["macd_yavas"]
+    macd_sinyal= params["macd_sinyal"]
 
     df = df.copy()
-    df["EMA20"]  = ema(df["Close"], 20)
-    df["EMA50"]  = ema(df["Close"], 50)
-    df["EMA100"] = ema(df["Close"], 100)
-    df["EMA200"] = ema(df["Close"], 200)
+    for col in ["Open","High","Low","Close","Volume"]:
+        if col in df.columns:
+            df[col] = df[col].squeeze() if hasattr(df[col], "squeeze") else df[col]
+
+    close = df["Close"]
+    df["EMA20"]  = ema(close, 20)
+    df["EMA50"]  = ema(close, 50)
+    df["EMA100"] = ema(close, 100)
+    df["EMA200"] = ema(close, 200)
     df["ATR"]    = atr_hesapla(df, atr_per)
-    df["K"], df["D"] = stokastik_hesapla(df)
 
-    son  = df.iloc[-1]
-    once = df.iloc[-2]
+    # MACD hesapla
+    ema_h          = close.ewm(span=macd_hizli,  adjust=False).mean()
+    ema_y          = close.ewm(span=macd_yavas,  adjust=False).mean()
+    df["MACD"]     = ema_h - ema_y
+    df["MACD_SIG"] = df["MACD"].ewm(span=macd_sinyal, adjust=False).mean()
+    df["MACD_HIS"] = df["MACD"] - df["MACD_SIG"]
+
+    son    = df.iloc[-1]
+    onceki = df.iloc[-2]
+
+    # ── 1. TREND FİLTRESİ ─────────────────────────────────────────────────────
+    if not (float(son["EMA20"]) > float(son["EMA50"]) >
+            float(son["EMA100"]) > float(son["EMA200"])):
+        return None
+
+    # ── 2. MACD: Histogram negatiften pozitife döndü ──────────────────────────
+    if not (float(onceki["MACD_HIS"]) < 0 and
+            float(son["MACD_HIS"])    > 0):
+        return None
+
+    # ── İŞLEM DETAYLARI ───────────────────────────────────────────────────────
     kapanis = float(son["Close"])
-
-    # EMA sırası kontrolü
-    if not (son["EMA20"] > son["EMA50"] > son["EMA100"] > son["EMA200"]):
-        return None
-
-    # Stokastik kesişim
-    if not (float(once["K"]) < float(once["D"]) and
-            float(son["K"]) > float(son["D"]) and
-            float(son["K"]) < stok_esik):
-        return None
-
-    # EMA destek kontrolü
-    ema_destek = None
-    for col in ["EMA20","EMA50","EMA100","EMA200"]:
-        ema_val = float(son[col])
-        if abs(kapanis - ema_val) / ema_val <= tolerans:
-            ema_destek = col
-            break
-    if ema_destek is None:
-        return None
-
     atr_val = float(son["ATR"])
     stop    = round(kapanis - atr_kat * atr_val, 2)
     hedef   = round(kapanis + rr * atr_kat * atr_val, 2)
 
     return {
         "Son Kapanis": round(kapanis, 2),
-        "EMA Destek":  ema_destek,
-        "K":           round(float(son["K"]), 2),
-        "D":           round(float(son["D"]), 2),
+        "MACD_HIS"   : round(float(son["MACD_HIS"]), 4),
+        "MACD"       : round(float(son["MACD"]), 4),
         "Stop":        stop,
+        "Stop%":       round((kapanis - stop) / kapanis * 100, 1),
         "Hedef":       hedef,
+        "Hedef%":      round((hedef - kapanis) / kapanis * 100, 1),
         "ATR":         round(atr_val, 2),
     }
+
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Ayarlar")
 
@@ -182,36 +232,80 @@ atr_katsayi = st.sidebar.slider(
 atr_periyot = st.sidebar.slider(
     "ATR Periyodu", min_value=7, max_value=21, value=14, step=1
 )
-ema_tolerans = st.sidebar.slider(
-    "EMA Tolerans %", min_value=0.5, max_value=5.0, value=2.0, step=0.5
-)
-stok_esik = st.sidebar.slider(
-    "Stokastik Eşik", min_value=10, max_value=40, value=20, step=5
-)
+
+st.sidebar.markdown("### 📊 MACD")
+macd_hizli  = st.sidebar.slider("MACD Hızlı EMA", min_value=5,  max_value=20, value=12, step=1)
+macd_yavas  = st.sidebar.slider("MACD Yavaş EMA", min_value=10, max_value=50, value=26, step=1)
+macd_sinyal = st.sidebar.slider("MACD Sinyal",    min_value=5,  max_value=20, value=9,  step=1)
 
 params = {
-    "ema_tolerans": ema_tolerans,
-    "stok_esik":    stok_esik,
-    "atr_periyot":  atr_periyot,
-    "atr_katsayi":  atr_katsayi,
-    "rr_katsayi":   rr_katsayi,
+    "atr_periyot" : atr_periyot,
+    "atr_katsayi" : atr_katsayi,
+    "rr_katsayi"  : rr_katsayi,
+    "macd_hizli"  : macd_hizli,
+    "macd_yavas"  : macd_yavas,
+    "macd_sinyal" : macd_sinyal,
 }
 
 # ─── ANA SAYFA ────────────────────────────────────────────────────────────────
 st.title("📈 BIST Sinyal Tarayıcı")
-st.caption("EMA20>50>100>200 + Stokastik Kesişim + EMA Destek")
+st.caption("Endeks Filtreli | EMA Trend | MACD Histogram Dönüşü | R:R 1:3")
 
-if st.button("🔍 Tara", use_container_width=True, type="primary"):
-    risk_tl = portfoy * risk_yuzde / 100
+# ─── ENDEKS DURUMU ────────────────────────────────────────────────────────────
+endeks_sonuc = endeks_kontrol()
+aktif        = endeks_sonuc[0]
+xu100        = endeks_sonuc[1]
+xu_ema200    = endeks_sonuc[2]
+xu_fark      = endeks_sonuc[3]
+
+if aktif is None:
+    st.warning("⚠️ BIST100 verisi alınamadı — endeks filtresi devre dışı.")
+    endeks_gecti = True   # veri yoksa filtre uygulanmaz
+elif aktif:
+    st.success(
+        f"✅ **BIST100 Aktif** — "
+        f"Kapanış: {xu100:,.0f}  |  EMA200: {xu_ema200:,.0f}  |  "
+        f"Fark: **+{xu_fark:.1f}%** — Strateji bugün aktif, tarama yapılabilir."
+    )
+    endeks_gecti = True
+else:
+    st.error(
+        f"🚫 **BIST100 EMA200 Altında** — "
+        f"Kapanış: {xu100:,.0f}  |  EMA200: {xu_ema200:,.0f}  |  "
+        f"Fark: **{xu_fark:.1f}%** — Strateji bugün pasif, işlem önerilmez."
+    )
+    endeks_gecti = False
+
+st.markdown("---")
+
+# ─── TARA BUTONU ──────────────────────────────────────────────────────────────
+tara_disabled = not endeks_gecti
+if tara_disabled:
+    st.info("Endeks EMA200 altında olduğu için tarama devre dışı. "
+            "Zorunlu tarama yapmak için sol menüden endeks filtresini kaldırabilirsiniz.")
+
+endeks_bypass = st.sidebar.checkbox(
+    "⚠️ Endeks filtresini atla", value=False,
+    help="BIST100 EMA200 altında olsa bile tarama yapılmasına izin verir."
+)
+if endeks_bypass:
+    tara_disabled = False
+    st.warning("⚠️ Endeks filtresi devre dışı bırakıldı.")
+
+if st.button("🔍 Tara", use_container_width=True, type="primary",
+             disabled=tara_disabled):
+    risk_tl   = portfoy * risk_yuzde / 100
     sinyaller = []
     hatalar   = []
 
     progress = st.progress(0, text="Tarama başlıyor...")
-    toplam = len(HISSELER)
+    toplam   = len(HISSELER)
 
     for i, hisse in enumerate(HISSELER):
-        progress.progress((i + 1) / toplam,
-                          text=f"Taraniyor: {hisse} ({i+1}/{toplam})")
+        progress.progress(
+            (i + 1) / toplam,
+            text=f"Taraniyor: {hisse} ({i+1}/{toplam})"
+        )
         df = veri_cek(hisse)
         if df is None:
             hatalar.append(hisse)
@@ -220,32 +314,35 @@ if st.button("🔍 Tara", use_container_width=True, type="primary"):
         if sonuc is None:
             continue
 
-        kapanis = sonuc["Son Kapanis"]
-        stop    = sonuc["Stop"]
+        kapanis    = sonuc["Son Kapanis"]
+        stop       = sonuc["Stop"]
         risk_hisse = kapanis - stop
         if risk_hisse <= 0:
             continue
-        lot        = int(risk_tl / risk_hisse)
-        giris_tl   = round(lot * kapanis, 2)
+        lot      = max(1, int(risk_tl / risk_hisse))
+        giris_tl = round(lot * kapanis, 2)
 
         sinyaller.append({
-            "Hisse":       hisse,
-            "Kapanis":     kapanis,
-            "EMA Destek":  sonuc["EMA Destek"],
-            "%K":          sonuc["K"],
-            "%D":          sonuc["D"],
-            "Stop":        stop,
-            "Hedef":       sonuc["Hedef"],
-            "ATR":         sonuc["ATR"],
-            "Lot":         lot,
-            "Giris TL":    giris_tl,
-            "Risk TL":     round(risk_tl, 2),
+            "★"         : "★" if hisse in TOP50 else "",
+            "Hisse"     : hisse,
+            "Kapanis"   : kapanis,
+            "MACD_HIS"  : sonuc["MACD_HIS"],
+            "MACD"      : sonuc["MACD"],
+            "Stop"      : stop,
+            "Stop%"     : sonuc["Stop%"],
+            "Hedef"     : sonuc["Hedef"],
+            "Hedef%"    : sonuc["Hedef%"],
+            "ATR"       : sonuc["ATR"],
+            "Lot"       : lot,
+            "Giris TL"  : giris_tl,
+            "Risk TL"   : round(risk_tl, 2),
         })
 
     progress.empty()
     st.session_state["sinyaller"] = sinyaller
     st.session_state["hatalar"]   = hatalar
     st.session_state["tarih"]     = datetime.now().strftime("%d.%m.%Y %H:%M")
+
 # ─── SONUÇLAR ─────────────────────────────────────────────────────────────────
 if "sinyaller" in st.session_state:
     sinyaller = st.session_state["sinyaller"]
@@ -254,16 +351,66 @@ if "sinyaller" in st.session_state:
 
     st.markdown(f"### Tarama Sonuçları — {tarih}")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Sinyal Sayısı",  len(sinyaller))
-    col2.metric("Taranan Hisse",  len(HISSELER))
-    col3.metric("Veri Hatası",    len(hatalar))
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Sinyal Sayısı", len(sinyaller))
+    col2.metric("Taranan Hisse", len(HISSELER))
+    col3.metric("Veri Hatası",   len(hatalar))
+    col4.metric("Endeks",        "✅ Aktif" if endeks_gecti else "🚫 Pasif")
+
+    if len(hatalar) > 0:
+        with st.expander(f"⚠️ Veri alınamayan {len(hatalar)} hisse — tıkla TradingView'da aç"):
+            st.caption(
+                "Bu hisselerden Yahoo Finance'den veri çekilemedi. "
+                "Sebep: sembol değişimi, hisse askıya alınmış veya geçici bağlantı sorunu olabilir. "
+                "Hisse adına tıklayarak TradingView grafiğini açabilirsiniz."
+            )
+            cols = st.columns(6)
+            for i, h in enumerate(sorted(hatalar)):
+                tv_url = f"https://tr.tradingview.com/chart/?symbol=BIST:{h}"
+                cols[i % 6].markdown(f"[{h}]({tv_url})")
 
     if len(sinyaller) == 0:
-        st.warning("Bugün sinyal bulunamadı.")
+        st.warning("Bugün kriterlere uyan hisse bulunamadı.")
     else:
-        df_sonuc = pd.DataFrame(sinyaller).sort_values("%K")
-        st.dataframe(df_sonuc, use_container_width=True, hide_index=True)
+        df_sonuc = pd.DataFrame(sinyaller).sort_values(
+            by=["★", "MACD_HIS"], ascending=[False, False])
+
+        top50_var = df_sonuc[df_sonuc["★"] == "★"]
+        if len(top50_var) > 0:
+            st.success(
+                f"★ **{len(top50_var)} hisse Top50 listesinde!** "
+                f"({', '.join(top50_var['Hisse'].tolist())}) — "
+                f"Backtest'te en başarılı hisseler, öncelikli değerlendir."
+            )
+
+        # Stop% ve Hedef% sütunlarını formatla
+        df_goster = df_sonuc.copy()
+        df_goster["Stop%"]  = df_goster["Stop%"].apply(lambda x: f"-%{x}")
+        df_goster["Hedef%"] = df_goster["Hedef%"].apply(lambda x: f"+%{x}")
+        df_goster["📈 Grafik"] = df_goster["Hisse"].apply(
+            lambda h: f"https://tr.tradingview.com/chart/?symbol=BIST:{h}"
+        )
+
+        st.dataframe(
+            df_goster,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "📈 Grafik": st.column_config.LinkColumn(
+                    "📈 Grafik",
+                    help="TradingView'da aç",
+                    display_text="TradingView →"
+                )
+            }
+        )
+
+        # Özet
+        toplam_giris = df_sonuc["Giris TL"].sum()
+        toplam_risk  = df_sonuc["Risk TL"].sum()
+        c1, c2 = st.columns(2)
+        c1.metric("Toplam Sermaye Kullanımı", f"{toplam_giris:,.0f} TL")
+        c2.metric("Toplam Risk", f"{toplam_risk:,.0f} TL  "
+                  f"(%{toplam_risk/portfoy*100:.1f} portföy)")
 
         # CSV indir
         csv = df_sonuc.to_csv(index=False).encode("utf-8-sig")
@@ -277,17 +424,20 @@ if "sinyaller" in st.session_state:
         st.markdown("---")
         st.markdown("### 📊 Grafik")
 
-        secili = st.selectbox(
-            "Hisse seçin:", [r["Hisse"] for r in sinyaller]
-        )
-
+        secili = st.selectbox("Hisse seçin:", [r["Hisse"] for r in sinyaller])
         df_grafik = veri_cek(secili, gun=150)
+
         if df_grafik is not None:
+            c = df_grafik["Close"].squeeze() if hasattr(df_grafik["Close"], "squeeze") else df_grafik["Close"]
             df_grafik["EMA20"]  = ema(df_grafik["Close"], 20)
             df_grafik["EMA50"]  = ema(df_grafik["Close"], 50)
             df_grafik["EMA100"] = ema(df_grafik["Close"], 100)
             df_grafik["EMA200"] = ema(df_grafik["Close"], 200)
-            df_grafik["K"], df_grafik["D"] = stokastik_hesapla(df_grafik)
+            ema_h = c.ewm(span=macd_hizli, adjust=False).mean()
+            ema_y = c.ewm(span=macd_yavas, adjust=False).mean()
+            df_grafik["MACD"]     = ema_h - ema_y
+            df_grafik["MACD_SIG"] = df_grafik["MACD"].ewm(span=macd_sinyal, adjust=False).mean()
+            df_grafik["MACD_HIS"] = df_grafik["MACD"] - df_grafik["MACD_SIG"]
 
             secili_sinyal = next(r for r in sinyaller if r["Hisse"] == secili)
 
@@ -316,35 +466,50 @@ if "sinyaller" in st.session_state:
                     name=col_name, line=dict(color=renk, width=genislik)
                 ), row=1, col=1)
 
-            # Stop ve hedef çizgileri
-            son_tarih  = df_grafik.index[-1]
-            bitis      = son_tarih + timedelta(days=15)
+            # Stop ve hedef yatay çizgiler
+            son_tarih = df_grafik.index[-1]
+            bitis     = son_tarih + timedelta(days=15)
             for seviye, renk, isim in [
                 (secili_sinyal["Stop"],  "#ef4444", "Stop"),
                 (secili_sinyal["Hedef"], "#22c55e", "Hedef"),
             ]:
-                fig.add_shape(type="line",
+                fig.add_shape(
+                    type="line",
                     x0=son_tarih, x1=bitis, y0=seviye, y1=seviye,
                     line=dict(color=renk, width=1.5, dash="dash"),
-                    row=1, col=1)
+                    row=1, col=1
+                )
                 fig.add_annotation(
-                    x=bitis, y=seviye, text=isim + " " + str(seviye),
-                    showarrow=False, font=dict(color=renk, size=11),
-                    xanchor="left", row=1, col=1)
+                    x=bitis, y=seviye,
+                    text=f"{isim} {seviye:.2f}",
+                    showarrow=False,
+                    font=dict(color=renk, size=11),
+                    xanchor="left", row=1, col=1
+                )
 
-            # Stokastik
-            fig.add_trace(go.Scatter(
-                x=df_grafik.index, y=df_grafik["K"],
-                name="%K", line=dict(color="#38bdf8", width=1.5)
+            # MACD histogram
+            colors = ["#3fb950" if v >= 0 else "#ef4444" for v in df_grafik["MACD_HIS"]]
+            fig.add_trace(go.Bar(
+                x=df_grafik.index, y=df_grafik["MACD_HIS"],
+                name="MACD His.", marker_color=colors, opacity=0.7
             ), row=2, col=1)
             fig.add_trace(go.Scatter(
-                x=df_grafik.index, y=df_grafik["D"],
-                name="%D", line=dict(color="#f59e0b", width=1.5)
+                x=df_grafik.index, y=df_grafik["MACD"],
+                name="MACD", line=dict(color="#38bdf8", width=1.5)
             ), row=2, col=1)
-            fig.add_hline(y=20, line_dash="dot",
-                          line_color="#64748b", row=2, col=1)
-            fig.add_hline(y=80, line_dash="dot",
-                          line_color="#64748b", row=2, col=1)
+            fig.add_trace(go.Scatter(
+                x=df_grafik.index, y=df_grafik["MACD_SIG"],
+                name="Sinyal", line=dict(color="#f59e0b", width=1.5)
+            ), row=2, col=1)
+            fig.add_hline(y=0, line_dash="dot", line_color="#64748b", row=2, col=1)
+
+            # Son sinyalin bulunduğu günü işaretle
+            son_gun = df_grafik.index[-1]
+            fig.add_vline(
+                x=son_gun, line_dash="dot",
+                line_color="#facc15", line_width=1,
+                row="all", col=1
+            )
 
             fig.update_layout(
                 template="plotly_dark",
@@ -360,3 +525,16 @@ if "sinyaller" in st.session_state:
             fig.update_xaxes(gridcolor="#1e293b")
 
             st.plotly_chart(fig, use_container_width=True)
+
+            # İşlem özeti
+            st.markdown(f"""
+| | |
+|---|---|
+| **Giriş** | {secili_sinyal['Kapanis']:.2f} TL |
+| **Stop** | {secili_sinyal['Stop']:.2f} TL (-%{secili_sinyal['Stop%']}) |
+| **Hedef** | {secili_sinyal['Hedef']:.2f} TL (+%{secili_sinyal['Hedef%']}) |
+| **R:R** | 1:{rr_katsayi:.0f} |
+| **Lot** | {secili_sinyal['Lot']:,} adet |
+| **Giriş Tutarı** | {secili_sinyal['Giris TL']:,.0f} TL |
+| **Risk** | {secili_sinyal['Risk TL']:,.0f} TL |
+""")
