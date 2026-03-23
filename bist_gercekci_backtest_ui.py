@@ -308,15 +308,18 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
                     kaz = (cikis - poz["giris"]) * poz["lot"]
                     portfoy_s += kaz
                     kapali_islem.append({
-                        "Açılış"  : poz["acilis"].strftime("%d.%m.%Y"),
-                        "Kapanış" : tarih.strftime("%d.%m.%Y"),
-                        "Hisse"   : sembol,
-                        "★"       : "★" if poz["top50"] else "",
-                        "Giriş"   : round(poz["giris"], 2),
-                        "Çıkış"   : round(cikis, 2),
-                        "Sonuç"   : "✅ Hedef" if sonuc=="hedef" else "❌ Stop",
-                        "K/Z (TL)": round(kaz, 0),
-                        "Portföy" : round(portfoy_s, 0),
+                        "Açılış"      : poz["acilis"].strftime("%d.%m.%Y"),
+                        "Kapanış"     : tarih.strftime("%d.%m.%Y"),
+                        "Hisse"       : sembol,
+                        "★"           : "★" if poz["top50"] else "",
+                        "Lot"         : poz["lot"],
+                        "Giriş"       : round(poz["giris"], 2),
+                        "Alış (TL)"   : round(poz["giris"] * poz["lot"], 0),
+                        "Çıkış"       : round(cikis, 2),
+                        "Satış (TL)"  : round(cikis * poz["lot"], 0),
+                        "Sonuç"       : "✅ Hedef" if sonuc=="hedef" else "❌ Stop",
+                        "K/Z (TL)"    : round(kaz, 0),
+                        "Portföy"     : round(portfoy_s, 0),
                     })
                     kapalanlar.append(poz)
             for k in kapalanlar:
@@ -356,15 +359,18 @@ if st.button("🚀 Backtest Çalıştır", use_container_width=True, type="prima
             kaz   = (cikis - poz["giris"]) * poz["lot"]
             portfoy_s += kaz
             kapali_islem.append({
-                "Açılış"  : poz["acilis"].strftime("%d.%m.%Y"),
-                "Kapanış" : son.name.strftime("%d.%m.%Y"),
-                "Hisse"   : sembol,
-                "★"       : "★" if poz["top50"] else "",
-                "Giriş"   : round(poz["giris"], 2),
-                "Çıkış"   : round(cikis, 2),
-                "Sonuç"   : "⏳ Açık",
-                "K/Z (TL)": round(kaz, 0),
-                "Portföy" : round(portfoy_s, 0),
+                "Açılış"      : poz["acilis"].strftime("%d.%m.%Y"),
+                "Kapanış"     : son.name.strftime("%d.%m.%Y"),
+                "Hisse"       : sembol,
+                "★"           : "★" if poz["top50"] else "",
+                "Lot"         : poz["lot"],
+                "Giriş"       : round(poz["giris"], 2),
+                "Alış (TL)"   : round(poz["giris"] * poz["lot"], 0),
+                "Çıkış"       : round(cikis, 2),
+                "Satış (TL)"  : round(cikis * poz["lot"], 0),
+                "Sonuç"       : "⏳ Açık",
+                "K/Z (TL)"    : round(kaz, 0),
+                "Portföy"     : round(portfoy_s, 0),
             })
 
     st.session_state["kapali"]   = kapali_islem
@@ -486,9 +492,15 @@ if "kapali" in st.session_state:
 
     with tab3:
         df_goster = df_i.drop(columns=["Kapanış_dt","Ay"], errors="ignore").copy()
-        df_goster["K/Z (TL)"] = df_goster["K/Z (TL)"].apply(lambda x: f"{x:+,.0f}")
-        df_goster["Portföy"]  = df_goster["Portföy"].apply(lambda x: f"{x:,.0f}")
-        st.dataframe(df_goster, use_container_width=True, hide_index=True)
+        df_goster["Alış (TL)"]  = df_goster["Alış (TL)"].apply(lambda x: f"{x:,.0f}")
+        df_goster["Satış (TL)"] = df_goster["Satış (TL)"].apply(lambda x: f"{x:,.0f}")
+        df_goster["K/Z (TL)"]   = df_goster["K/Z (TL)"].apply(lambda x: f"{x:+,.0f}")
+        df_goster["Portföy"]    = df_goster["Portföy"].apply(lambda x: f"{x:,.0f}")
+        st.dataframe(
+            df_goster[["Açılış","Kapanış","Hisse","★","Lot","Giriş",
+                        "Alış (TL)","Çıkış","Satış (TL)","Sonuç","K/Z (TL)","Portföy"]],
+            use_container_width=True, hide_index=True
+        )
 
         csv = df_i.drop(columns=["Kapanış_dt","Ay"], errors="ignore").to_csv(
             index=False).encode("utf-8-sig")
