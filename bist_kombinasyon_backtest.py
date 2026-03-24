@@ -3,7 +3,6 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, date
 import plotly.graph_objects as go
-import io
 
 st.set_page_config(
     page_title="BIST Kombinasyon Backtest",
@@ -508,26 +507,20 @@ if "sonuclar" in st.session_state:
             </div>
         </div>""", unsafe_allow_html=True)
 
-    # ─── EXCEL İNDİR ────────────────────────────────────────────────────────────
+    # ─── CSV İNDİR ──────────────────────────────────────────────────────────────
     st.markdown("---")
 
-    df_excel = df_sonuc[["ATR","R:R","Son Portföy (TL)","Getiri (%)","Win Rate (%)",
-                          "Toplam İşlem","Kazanan","Kaybeden","Atlanan Sinyal"]].copy()
+    df_csv = df_sonuc[["ATR","R:R","Son Portföy (TL)","Getiri (%)","Win Rate (%)",
+                        "Toplam İşlem","Kazanan","Kaybeden","Atlanan Sinyal"]].copy()
 
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df_excel.to_excel(writer, index=False, sheet_name="Kombinasyonlar")
-        ws = writer.sheets["Kombinasyonlar"]
-        for col_cells in ws.columns:
-            max_len = max(len(str(cell.value or "")) for cell in col_cells) + 4
-            ws.column_dimensions[col_cells[0].column_letter].width = max_len
+    csv_data = df_csv.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
     col_d, col_c = st.columns([1, 3])
     col_d.download_button(
-        label="⬇️ Excel İndir",
-        data=buffer.getvalue(),
-        file_name=f"kombinasyon_backtest_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        label="⬇️ CSV İndir",
+        data=csv_data,
+        file_name=f"kombinasyon_backtest_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv",
         use_container_width=True,
     )
 
