@@ -134,23 +134,30 @@ def veri_cek(ticker, gun=300):
 @st.cache_data(ttl=3600)
 def endeks_kontrol():
     """BIST100 son kapanış > EMA200 mi kontrol eder. Sonucu 1 saat cache'ler."""
-    try:
-        df = yf.download("XU100.IS", period="300d",
-                         interval="1d", progress=False, auto_adjust=True)
-        if df.empty:
-            return None, None, None, None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
-        df.dropna(subset=["EMA200"], inplace=True)
-        son         = df.iloc[-1]
-        kapanis     = float(son["Close"])
-        ema200      = float(son["EMA200"])
-        aktif       = kapanis > ema200
-        fark_pct    = (kapanis - ema200) / ema200 * 100
-        return aktif, kapanis, ema200, fark_pct
-    except Exception:
-        return None, None, None, None
+    # Birden fazla sembol dene — Streamlit Cloud'da bazıları çalışmayabilir
+    for sembol in ["XU100.IS", "^XU100", "BIST100.IS"]:
+        try:
+            df = yf.download(sembol, period="300d",
+                             interval="1d", progress=False, auto_adjust=True)
+            if df.empty or len(df) < 10:
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            for col in df.columns:
+                v = df[col]
+                df[col] = v.iloc[:, 0] if hasattr(v, "iloc") and v.ndim == 2 else v.squeeze()
+            df["EMA200"] = df["Close"].ewm(span=200, adjust=False).mean()
+            df.dropna(subset=["EMA200"], inplace=True)
+            if df.empty: continue
+            son      = df.iloc[-1]
+            kapanis  = float(son["Close"])
+            ema200   = float(son["EMA200"])
+            aktif    = kapanis > ema200
+            fark_pct = (kapanis - ema200) / ema200 * 100
+            return aktif, kapanis, ema200, fark_pct
+        except Exception:
+            continue
+    return None, None, None, None
 
 # ─── SİNYAL TARAMA (MACD STRATEJİSİ) ────────────────────────────────────────
 def sinyal_tara(df, params):
