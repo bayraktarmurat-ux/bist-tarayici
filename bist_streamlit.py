@@ -169,7 +169,7 @@ def sinyal_tara(df, params):
         if col in df.columns:
             df[col] = df[col].squeeze() if hasattr(df[col], "squeeze") else df[col]
 
-    close = df["Close"]
+    close = pd.Series(df["Close"].values.flatten(), index=df.index)
     df["EMA20"]  = ema(close, 20)
     df["EMA50"]  = ema(close, 50)
     df["EMA100"] = ema(close, 100)
@@ -428,11 +428,11 @@ if "sinyaller" in st.session_state:
         df_grafik = veri_cek(secili, gun=150)
 
         if df_grafik is not None:
-            c = df_grafik["Close"].squeeze() if hasattr(df_grafik["Close"], "squeeze") else df_grafik["Close"]
-            df_grafik["EMA20"]  = ema(df_grafik["Close"], 20)
-            df_grafik["EMA50"]  = ema(df_grafik["Close"], 50)
-            df_grafik["EMA100"] = ema(df_grafik["Close"], 100)
-            df_grafik["EMA200"] = ema(df_grafik["Close"], 200)
+            c = pd.Series(df_grafik["Close"].values.flatten(), index=df_grafik.index)
+            df_grafik["EMA20"]  = ema(c, 20)
+            df_grafik["EMA50"]  = ema(c, 50)
+            df_grafik["EMA100"] = ema(c, 100)
+            df_grafik["EMA200"] = ema(c, 200)
             ema_h = c.ewm(span=macd_hizli, adjust=False).mean()
             ema_y = c.ewm(span=macd_yavas, adjust=False).mean()
             df_grafik["MACD"]     = ema_h - ema_y
