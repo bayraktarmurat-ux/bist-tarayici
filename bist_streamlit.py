@@ -123,9 +123,9 @@ def veri_cek(ticker, gun=300):
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         df = df[["Open","High","Low","Close","Volume"]].dropna()
-        # Python 3.14 / yeni pandas uyumu: her sutunu Series'e donustur
         for col in df.columns:
-            df[col] = df[col].squeeze()
+            v = df[col]
+            df[col] = v.iloc[:, 0] if hasattr(v, "iloc") and v.ndim == 2 else v.squeeze()
         return df
     except Exception:
         return None
@@ -167,9 +167,10 @@ def sinyal_tara(df, params):
     df = df.copy()
     for col in ["Open","High","Low","Close","Volume"]:
         if col in df.columns:
-            df[col] = df[col].squeeze() if hasattr(df[col], "squeeze") else df[col]
+            v = df[col]
+            df[col] = v.iloc[:, 0] if hasattr(v, "iloc") and v.ndim == 2 else v
 
-    close = pd.Series(df["Close"].values.flatten(), index=df.index)
+    close = df["Close"].squeeze()
     df["EMA20"]  = ema(close, 20)
     df["EMA50"]  = ema(close, 50)
     df["EMA100"] = ema(close, 100)
@@ -428,7 +429,11 @@ if "sinyaller" in st.session_state:
         df_grafik = veri_cek(secili, gun=150)
 
         if df_grafik is not None:
-            c = pd.Series(df_grafik["Close"].values.flatten(), index=df_grafik.index)
+            for col in ["Open","High","Low","Close","Volume"]:
+                if col in df_grafik.columns:
+                    v = df_grafik[col]
+                    df_grafik[col] = v.iloc[:, 0] if hasattr(v, "iloc") and v.ndim == 2 else v
+            c = df_grafik["Close"].squeeze()
             df_grafik["EMA20"]  = ema(c, 20)
             df_grafik["EMA50"]  = ema(c, 50)
             df_grafik["EMA100"] = ema(c, 100)
